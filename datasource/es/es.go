@@ -16,9 +16,10 @@ import (
 	"github.com/ccfos/nightingale/v6/datasource/commons/eslike"
 	"github.com/ccfos/nightingale/v6/models"
 	"github.com/ccfos/nightingale/v6/pkg/tlsx"
-
-	"github.com/mitchellh/mapstructure"
 	"github.com/olivere/elastic/v7"
+
+	"github.com/elastic/go-elasticsearch/v9"
+	"github.com/mitchellh/mapstructure"
 	"github.com/toolkits/pkg/logger"
 )
 
@@ -27,18 +28,18 @@ const (
 )
 
 type Elasticsearch struct {
-	Addr        string            `json:"es.addr" mapstructure:"es.addr"`
-	Nodes       []string          `json:"es.nodes" mapstructure:"es.nodes"`
-	Timeout     int64             `json:"es.timeout" mapstructure:"es.timeout"` // millis
-	Basic       BasicAuth         `json:"es.basic" mapstructure:"es.basic"`
-	TLS         TLS               `json:"es.tls" mapstructure:"es.tls"`
-	Version     string            `json:"es.version" mapstructure:"es.version"`
-	Headers     map[string]string `json:"es.headers" mapstructure:"es.headers"`
-	MinInterval int               `json:"es.min_interval" mapstructure:"es.min_interval"` // seconds
-	MaxShard    int               `json:"es.max_shard" mapstructure:"es.max_shard"`
-	ClusterName string            `json:"es.cluster_name" mapstructure:"es.cluster_name"`
-	EnableWrite bool              `json:"es.enable_write" mapstructure:"es.enable_write"` // 允许写操作
-	Client      *elastic.Client   `json:"es.client" mapstructure:"es.client"`
+	Addr        string                `json:"es.addr" mapstructure:"es.addr"`
+	Nodes       []string              `json:"es.nodes" mapstructure:"es.nodes"`
+	Timeout     int64                 `json:"es.timeout" mapstructure:"es.timeout"` // millis
+	Basic       BasicAuth             `json:"es.basic" mapstructure:"es.basic"`
+	TLS         TLS                   `json:"es.tls" mapstructure:"es.tls"`
+	Version     string                `json:"es.version" mapstructure:"es.version"`
+	Headers     map[string]string     `json:"es.headers" mapstructure:"es.headers"`
+	MinInterval int                   `json:"es.min_interval" mapstructure:"es.min_interval"` // seconds
+	MaxShard    int                   `json:"es.max_shard" mapstructure:"es.max_shard"`
+	ClusterName string                `json:"es.cluster_name" mapstructure:"es.cluster_name"`
+	EnableWrite bool                  `json:"es.enable_write" mapstructure:"es.enable_write"` // 允许写操作
+	Client      *elasticsearch.Client `json:"es.client" mapstructure:"es.client"`
 }
 
 type TLS struct {
@@ -87,25 +88,22 @@ func (e *Elasticsearch) InitClient() error {
 	}
 
 	var err error
-	options := []elastic.ClientOptionFunc{
-		elastic.SetURL(e.Nodes...),
+	cfg := elasticsearch.Config{
+		Addresses: e.Nodes,
+		Transport: transport,
+		Header:    http.Header{},
 	}
 
-	if e.Basic.Username != "" {
-		options = append(options, elastic.SetBasicAuth(e.Basic.Username, e.Basic.Password))
+	if e.Basic.Enable && e.Basic.Username != "" && e.Basic.Password != "" {
+		cfg.Username = e.Basic.Username
+		cfg.Password = e.Basic.Password
 	}
 
-	headers := http.Header{}
 	for k, v := range e.Headers {
-		headers[k] = []string{v}
+		cfg.Header[k] = []string{v}
 	}
 
-	options = append(options, elastic.SetHeaders(headers))
-	options = append(options, elastic.SetHttpClient(&http.Client{Transport: transport}))
-	options = append(options, elastic.SetSniff(false))
-	options = append(options, elastic.SetHealthcheck(false))
-
-	e.Client, err = elastic.NewClient(options...)
+	e.Client, err = elasticsearch.NewClient(cfg)
 	return err
 }
 
@@ -183,24 +181,28 @@ func (e *Elasticsearch) MakeTSQuery(ctx context.Context, query interface{}, even
 }
 
 func (e *Elasticsearch) QueryData(ctx context.Context, queryParam interface{}) ([]models.DataResp, error) {
-
-	search := func(ctx context.Context, indices []string, source interface{}, timeout int, maxShard int) (*elastic.SearchResult, error) {
-		return e.Client.Search().
-			Index(indices...).
-			IgnoreUnavailable(true).
-			Source(source).
-			Timeout(fmt.Sprintf("%ds", timeout)).
-			MaxConcurrentShardRequests(maxShard).
-			Do(ctx)
-	}
-
-	return eslike.QueryData(ctx, queryParam, e.Timeout, e.Version, search)
+	return eslike.QueryData(ctx, queryParam, e.Timeout, e.Version, e.Client)
 }
 
 func (e *Elasticsearch) QueryIndices() ([]string, error) {
-	result, err := e.Client.IndexNames()
+	res, err := e.Client.Cat.Indices(e.Client.Cat.Indices.WithFormat("json"))
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
 
-	return result, err
+	var indices []map[string]interface{}
+	if err := json.NewDecoder(res.Body).Decode(&indices); err != nil {
+		return nil, err
+	}
+
+	var result []string
+	for _, idx := range indices {
+		if name, ok := idx["index"].(string); ok {
+			result = append(result, name)
+		}
+	}
+	return result, nil
 }
 
 func (e *Elasticsearch) QueryFields(indexs []string) ([]string, error) {

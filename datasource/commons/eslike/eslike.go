@@ -37,6 +37,10 @@ type Query struct {
 
 	Timeout  int `json:"timeout" mapstructure:"timeout"`
 	MaxShard int `json:"max_shard" mapstructure:"max_shard"`
+
+	QueryType    string                 `json:"query_type" mapstructure:"query_type"`
+	Query        string                 `json:"query" mapstructure:"query"`
+	CustomParams map[string]interface{} `json:"custom_params" mapstructure:"custom_params"`
 }
 
 type MetricAggr struct {
